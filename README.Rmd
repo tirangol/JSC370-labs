@@ -1,8 +1,9 @@
 ---
 title: "Lab 05 - Data Wrangling"
 output:
-  html_document:
+  html_document: 
     html_preview: false
+    theme: readable
 link-citations: yes
 ---
 
@@ -89,9 +90,19 @@ Once you are done setting up the project, you can now start working with the MET
 
 1. Load the `data.table` (and the `dtplyr` and `dplyr` packages).
 
+```{r include=FALSE}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+install.packages('dtplyr')
+install.packages('R.utils')
+library(dtplyr)
+library(dplyr)
+library(data.table)
+library(leaflet)
+```
+
 2. Load the met data from https://raw.githubusercontent.com/JSC370/JSC370-2024/main/data/met_all_2023.gz, and also the station data. For the latter, you can use the code we used during lecture to pre-process the stations data:
 
-```{r stations-data, eval = FALSE}
+```{r stations-data}
 # Download the data
 stations <- fread("ftp://ftp.ncdc.noaa.gov/pub/data/noaa/isd-history.csv")
 stations[, USAF := as.integer(USAF)]
@@ -112,12 +123,30 @@ stations[, n := 1:.N, by = .(USAF)]
 stations <- stations[n == 1,][, n := NULL]
 
 # Read in the met data
+download.file(
+  "https://raw.githubusercontent.com/JSC370/JSC370-2025/main/data/met/met_all.gz",
+  destfile = "met_all.gz",
+  method   = "curl",
+  timeout  = 60
+  )
+
+met_dt <- fread("met_all.gz")
+met_dt <- met_dt[temp > -10][order(temp)] 
+head(met_dt)
+head(stations)
 ```
 
 3. Merge the data as we did during the lecture. Use the `merge()` code and you can also try the tidy way with `left_join()`
 
 ```{r}
-
+data <- merge(x=stations, y=met_dt,
+              by.x='USAF', by.y='USAFID',
+              all.x=FALSE, all.y=TRUE) |>
+  filter(!is.na(temp), !is.na(wind.sp), !is.na(atm.press)) |>
+  group_by(USAF) |>
+  summarize(temp = mean(temp), wind.sp = mean(wind.sp), atm.press = mean(atm.press),
+            country = first(CTRY), state = first(STATE), lon = first(lon), lat = first(lat))
+head(data)
 ```
 
 
@@ -125,9 +154,27 @@ stations <- stations[n == 1,][, n := NULL]
 
 Across all weather stations, what stations have the median values of temperature, wind speed, and atmospheric pressure? Using the `quantile()` function, identify these three stations. Do they coincide?
 
-```{r}
+```{r warning=FALSE}
+median_temp <- data |>
+  filter(abs(temp - quantile(temp, 0.5)) <= 0) |>
+  group_by(USAF, country, state, lat, lon) |>
+  summarize()
 
+median_wind_speed <- data |>
+  filter(abs(wind.sp - quantile(wind.sp, 0.5)) <= 0) |>
+  group_by(USAF, country, state, lat, lon) |>
+  summarize()
+
+median_pressure <- data |>
+  filter(abs(atm.press - quantile(atm.press, 0.5)) <= 0) |>
+  group_by(USAF, country, state, lat, lon) |>
+  summarize()
+
+median_temp
+median_wind_speed
+median_pressure
 ```
+The stations with the median temperature, wind speed, and atmospheric pressure are 724106, 726070, and 726539, from the states of VA, ME, and SD respectively. These three stations do not coincide.
 
 Knit the document, commit your changes, and save it on GitHub. Don't forget to add `README.md` to the tree, the first time you render it.
 
@@ -136,7 +183,12 @@ Knit the document, commit your changes, and save it on GitHub. Don't forget to a
 Just like the previous question, you are asked to identify what is the most representative, the median, station per state. This time, instead of looking at one variable at a time, look at the euclidean distance. If multiple stations show in the median, select the one located at the lowest latitude.
 
 ```{r}
-
+median_statewise <- data |>
+  group_by(state) |>
+  mutate(dist = ((temp - quantile(temp, 0.5)) ** 2 + (wind.sp - quantile(wind.sp, 0.5)) ** 2 + (atm.press - quantile(atm.press, 0.5)) ** 2) ** 0.5) |>
+  filter(dist == min(dist)) |>
+  summarize(USAF, country, state, lat, lon)
+median_statewise
 ```
 
 Knit the doc and save it on GitHub.
@@ -146,6 +198,24 @@ Knit the doc and save it on GitHub.
 For each state, identify what is the station that is closest to the mid-point of the state. Combining these with the stations you identified in the previous question, use `leaflet()` to visualize all ~100 points in the same figure, applying different colors for those identified in this question.
 
 ```{r}
+central <- data |>
+  group_by(state) |>
+  mutate(dist = ((lon - quantile(lon, 0.5)) ** 2 + (lat - quantile(lat, 0.5)) ** 2) ** 0.5) |>
+  filter(dist == min(dist)) |>
+  summarize(USAF, country, state, lon, lat)
+
+data_all <- bind_rows(list(median_temp, median_wind_speed, median_pressure, median_statewise, central), .id='source') |>
+  mutate(source = case_when(source == 1 ~ 'Median Temperature',
+                             source == 2 ~ 'Median Wind Speed',
+                             source == 3 ~ 'Median Pressure',
+                             source == 4 ~ 'Closest to Statewise Median Values',
+                             source == 5 ~ 'Closest to State Midpoint'))
+
+pal <- colorFactor(palette=rainbow(5), domain=data_all$source)
+leaflet(data_all) |>
+  addTiles() |>
+  addCircleMarkers(lng=~lon, lat=~lat, color=~pal(source), stroke=FALSE, radius=5, fillOpacity=0.8) |>
+  addLegend('bottomright', pal=pal, values=~source, title='Data Type')
 
 ```
 
@@ -162,7 +232,18 @@ Start by computing the states' average temperature. Use that measurement to clas
 - High: temp >= 25
 
 ```{r}
-
+data |>
+  group_by(state) |>
+  mutate(state_temp = mean(temp)) |>
+  ungroup() |>
+  mutate(avg_temp = case_when(state_temp < 20 ~ 'low',
+                              state_temp >= 20 & state_temp < 25 ~ 'mid',
+                              state_temp >= 25 ~ 'high')) |>
+  group_by(avg_temp) |>
+  summarize(num_states=n_distinct(state),
+            temp=quantile(temp, 0.5),
+            wind.sp=quantile(wind.sp, 0.5),
+            atm.press=quantile(atm.press, 0.5))
 ```
 
 Once you are done with that, you can compute the following:
@@ -176,7 +257,21 @@ Once you are done with that, you can compute the following:
 All by the levels described before.
 
 ```{r}
+# Number of entries
+dim(data)
 
+# Number of NA entries
+sum(is.na(data))
+
+# Number of stations
+n_distinct(data$USAF)
+
+# Number of states
+n_distinct(data$state)
+
+# Mean values
+data |>
+  summarize(temp = mean(temp), wind.sp = mean(wind.sp), atm.press = mean(atm.press))
 ```
 
 Knit the document, commit your changes, and push them to GitHub. 
@@ -191,5 +286,30 @@ Let's practice running regression models with smooth functions on X. We need the
 - fit both a linear model and a spline model (use `gam()` with a cubic regression spline on wind speed). Summarize and plot the results from the models and interpret which model is the best fit and why.
 
 ```{r}
+library(ggplot2)
+library(mgcv)
 
+data <- merge(x=stations, y=met_dt,
+              by.x='USAF', by.y='USAFID',
+              all.x=FALSE, all.y=TRUE) |>
+  filter(!is.na(temp), !is.na(wind.sp), !is.na(atm.press)) |>
+  group_by(USAF) |>
+  summarize(temp = quantile(temp, 0.5), wind.sp = quantile(wind.sp, 0.5),
+            atm.press = quantile(atm.press, 0.5), country = first(CTRY),
+            state = first(STATE), lon = first(lon), lat = first(lat))
+
+model_gam <- gam(temp ~ s(wind.sp, bs='cr'), data=data)
+model_lm <- lm(temp ~ wind.sp, data=data)
+summary(model_gam)
+summary(model_lm)
+
+data$pred_gam = predict(model_gam)
+data$pred_lm = predict(model_lm)
+ggplot(data, aes(x=wind.sp, y=temp)) +
+  geom_point(alpha=0.5, color='black') +
+  geom_line(aes(y = pred_lm), color='blue', size=1) +
+  geom_line(aes(y = pred_gam), color='red', size=1) + 
+  theme_minimal()
 ```
+
+Since both the correlation between wind speed and temperature is extremely weak if it even exists, and that models make similar predictions, it is difficult to quantitatively estimate which of the two models are better. Therefore, it is better to rely on the linear regression model for its increased interpretability and simplicity.
